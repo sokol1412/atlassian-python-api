@@ -1,6 +1,7 @@
 # coding=utf-8
 import logging
 import random
+import time
 from json import dumps
 
 import requests
@@ -62,7 +63,7 @@ class AtlassianRestAPI(object):
         cloud=False,
         proxies=None,
         token=None,
-        backoff_and_retry=False,
+        backoff_and_retry=True,
         retry_error_matches=[
             (429, "Too Many Requests"),
             (503, "Service Unavailable"),
@@ -95,7 +96,7 @@ class AtlassianRestAPI(object):
                 designed for Atlassian Cloud where API limits are commonly hit if doing
                 operations on many issues, and the limits require a cooling off period.
                 The wait period before the next request increases exponentially with each
-                failed retry. Defaults to False.
+                failed retry. Defaults to True.
             retry_error_matches (list, optional): Errors to match, passed as a list of tuples
                 containing the response code and the response text to match (exact match).
                 Defaults to the rate limit error from Atlassian Cloud - [(429, 'Too Many Requests')].
@@ -286,6 +287,17 @@ class AtlassianRestAPI(object):
 
         backoff = 1
         retries = 0
+
+        def should_rerun(retries, backoff):
+            for em in self.retry_error_matches:
+                if retries > self.max_backoff_retries:
+                    log.warning("Hit max backoff retry limit of {0}, no more retries.".format(self.max_backoff_retries))
+                    return False
+                if response.status_code == em[0] and response.reason == em[1]:
+                    log.warning('Backing off due to error "{0}: {1}" for {2}s'.format(em[0], em[1], backoff))
+                    time.sleep(backoff + (random.random() * backoff / 10))
+                    return True
+
         while True:
             response = self._session.request(
                 method=method,
@@ -299,17 +311,12 @@ class AtlassianRestAPI(object):
                 proxies=self.proxies,
             )
             if self.backoff_and_retry:
-                for em in self.retry_error_matches:
-                    if retries > self.max_backoff_retries:
-                        log.warning(
-                            "Hit max backoff retry limit of {0}, no more retries.".format(self.max_backoff_retries)
-                        )
-                        break
-                    if response.status_code == em[0] and response.reason == em[1]:
-                        log.warning('Backing off due to error "{0}: {1}" for {2}s'.format(em[0], em[1], backoff))
-                        time.sleep(backoff + (random.random() * backoff / 10))
-                        backoff = min(2 * backoff, self.max_backoff_seconds)
-                        retries += 1
+                if should_rerun(retries, backoff):
+                    retries += 1
+                    backoff = min(2 * backoff, self.max_backoff_seconds)
+                    continue
+                else:
+                    break
             else:
                 break
 
